@@ -1,6 +1,7 @@
 import { expect } from 'chai';
-import { BigNumberish, Contract } from 'ethers';
+import type { BigNumberish, Contract } from 'ethers';
 import { network } from 'hardhat';
+import { describe, it } from 'mocha';
 
 const { ethers, networkHelpers } = await network.connect();
 let TimelockV1: any;
@@ -75,16 +76,17 @@ describe('TimelockV1 Test Suite', () => {
 
         it('should revert attempt to set unlock time that is past', async () => {
           let amount = '2';
-          let pastTime = 1771933663;
+          const pastTime = (await networkHelpers.time.latest()) - 1;
           await expect(
             TimelockV1.connect(addr1).deposit(pastTime, {
               value: toWei(amount),
             })
-          ).to.be.revertedWith('Deposit must be greater than zero');
+          ).to.be.revertedWith('Unlock time must be in the future');
         });
       });
 
       describe('Success Deposit Txn', () => {
+        it('should deposit ETH to vault', async () => {});
         it('should deposit ETH to vault', async () => {
           const unlockTime = setTime(1);
           const depositAmount = toWei('1');
@@ -102,7 +104,7 @@ describe('TimelockV1 Test Suite', () => {
           expect(await TimelockV1.getVaultCount(addr1)).to.be.eq(1);
         });
 
-        it.only('should deposit ETH to vault multiple times', async () => {
+        it('should deposit ETH to vault multiple times', async () => {
           const unlockTime = await setTime(1);
           const depositAmount1 = toWei('1');
           const depositAmount2 = toWei('2');
@@ -130,6 +132,111 @@ describe('TimelockV1 Test Suite', () => {
           });
 
           expect(await TimelockV1.getVaultCount(addr1)).to.be.eq(2);
+        });
+      });
+    });
+    describe('Withdraw Transaction', () => {
+      describe('Validations', () => {
+        it('should revert when an invalid id is provided', async () => {
+          const unlockTime = await setTime(1);
+          const depositAmount = toWei('1');
+          await TimelockV1.connect(addr1).deposit(unlockTime, {
+            value: depositAmount,
+          });
+
+          await expect(
+            TimelockV1.connect(addr1).withdraw(1000n)
+          ).to.be.revertedWith('Invalid vault ID');
+        });
+        it('should revert when vault is not active', async () => {
+          const unlockTime = await setTime(1);
+          const depositAmount = toWei('1');
+          await TimelockV1.connect(addr1).deposit(unlockTime, {
+            value: depositAmount,
+          });
+
+          await networkHelpers.time.increaseTo(unlockTime + 1);
+
+          // withdraw from vault to make it inactive
+          await TimelockV1.connect(addr1).withdraw(0);
+          // attempt to withdraw again from the same vault
+          await expect(
+            TimelockV1.connect(addr1).withdraw(0)
+          ).to.be.revertedWith('Vault is not active');
+        });
+        it('should revert when vault has zero balance', async () => {
+          const unlockTime = await setTime(1);
+          const depositAmount = toWei('1');
+          await TimelockV1.connect(addr1).deposit(unlockTime, {
+            value: depositAmount,
+          });
+
+          await networkHelpers.time.increaseTo(unlockTime + 1);
+
+          await TimelockV1.connect(addr1).withdraw(0);
+
+          await expect(
+            TimelockV1.connect(addr1).withdraw(0)
+          ).to.be.revertedWith('Vault is not active');
+        });
+        it('should revert if time has not elapsed', async () => {
+          const unlockTime = await setTime(1);
+          const depositAmount = toWei('1');
+          await TimelockV1.connect(addr1).deposit(unlockTime, {
+            value: depositAmount,
+          });
+
+          await expect(
+            TimelockV1.connect(addr1).withdraw(0)
+          ).to.be.revertedWith('Funds are still locked');
+        });
+        it('should revert if non-owner attempts to withdraw', async () => {
+          const unlockTime = await setTime(1);
+          const depositAmount = toWei('1');
+          await TimelockV1.connect(addr1).deposit(unlockTime, {
+            value: depositAmount,
+          });
+
+          await networkHelpers.time.increaseTo(unlockTime + 1);
+
+          await expect(
+            TimelockV1.connect(addr2).withdraw(0)
+          ).to.be.revertedWith('Invalid vault ID');
+        });
+      });
+      describe('Success Withdraw() Transaction', () => {
+        it('should emit withdrawn event when vault is withdrawn', async () => {
+          const unlockTime = await setTime(1);
+          const depositAmount = toWei('1');
+          await TimelockV1.connect(addr1).deposit(unlockTime, {
+            value: depositAmount,
+          });
+
+          await networkHelpers.time.increaseTo(unlockTime + 1);
+
+          await expect(TimelockV1.connect(addr1).withdraw(0))
+            .to.emit(TimelockV1, 'Withdrawn')
+            .withArgs(addr1.address, 0, depositAmount);
+        });
+      });
+    });
+    describe('WithdrawAll Transaction', () => {
+      describe('Validations', () => {
+        it('should revert if no active vaults exist', async () => {
+          await expect(
+            TimelockV1.connect(addr1).withdrawAll()
+          ).to.be.revertedWith('No unlocked funds available');
+        });
+        it('should revert if time has not elapsed for any vaults', async () => {
+          const unlockTime = await setTime(1);
+          const depositAmount = toWei('1');
+          await TimelockV1.connect(addr1).deposit(unlockTime, {
+            value: depositAmount,
+          });
+
+          await expect(
+            TimelockV1.connect(addr1).withdrawAll()
+          ).to.be.revertedWith('No unlocked funds available');
         });
       });
     });
