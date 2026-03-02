@@ -10,17 +10,24 @@ interface IERC20 {
 }
 
 contract StakingRewards {
+  string public constant name = "Staked Receipt Token";
+  string public constant symbol = "sSTK";
+  uint8 public constant decimals = 18;
+
   IERC20 public immutable stakingToken;
   address public owner;
   uint256 public rewardRate;
   uint256 public lastUpdateTime;
   uint256 public rewardPerTokenStored;
 
-  mapping(address => uint256) public stakedBalance;
-  uint256 public totalStaked;
+  uint256 public totalSupply;
+  mapping(address => uint256) public balanceOf;
+  mapping(address => mapping(address => uint256)) public allowance;
   mapping(address => uint256) public userRewardPerTokenPaid;
   mapping(address => uint256) public rewards;
 
+  event Transfer(address indexed from, address indexed to, uint256 value);
+  event Approval(address indexed owner, address indexed spender, uint256 value);
   event Staked(address indexed user, uint256 amount);
   event Withdrawn(address indexed user, uint256 amount);
   event RewardClaimed(address indexed user, uint256 reward);
@@ -41,7 +48,25 @@ contract StakingRewards {
     _;
   }
 
-  function _updateReward(address account) internal {
+  function rewardPerToken() public view returns (uint256) {
+    if (totalSupply == 0) {
+      return rewardPerTokenStored;
+    }
+
+    uint256 secondsPassed = block.timestamp - lastUpdateTime;
+    uint256 extraRewardPerToken = (secondsPassed * rewardRate * 1e18) / totalSupply;
+
+    return rewardPerTokenStored + extraRewardPerToken;
+  }
+
+  function earned(address account) public view returns (uint256) {
+    uint256 rewardDifference = rewardPerToken() - userRewardPerTokenPaid[account];
+    uint256 newRewards = (balanceOf[account] * rewardDifference) / 1e18;
+
+    return rewards[account] + newRewards;
+  }
+
+  function updateReward(address account) internal {
     rewardPerTokenStored = rewardPerToken();
     lastUpdateTime = block.timestamp;
 
@@ -51,25 +76,41 @@ contract StakingRewards {
     }
   }
 
-  function rewardPerToken() public view returns (uint256) {
-    if (totalStaked == 0) {
-      return rewardPerTokenStored;
-    }
-
-    uint256 timeElapsed = block.timestamp - lastUpdateTime;
-    return rewardPerTokenStored + ((timeElapsed * rewardRate * 1e18) / totalStaked);
+  function stakedBalance(address account) public view returns (uint256) {
+    return balanceOf[account];
   }
 
-  function earned(address account) public view returns (uint256) {
-    uint256 paid = userRewardPerTokenPaid[account];
-    uint256 currentRewardPerToken = rewardPerToken();
-    uint256 pending = (stakedBalance[account] * (currentRewardPerToken - paid)) / 1e18;
-    return rewards[account] + pending;
+  function totalStaked() public view returns (uint256) {
+    return totalSupply;
+  }
+
+  function approve(address spender, uint256 amount) external returns (bool) {
+    allowance[msg.sender][spender] = amount;
+    emit Approval(msg.sender, spender, amount);
+    return true;
+  }
+
+  function transfer(address to, uint256 amount) external returns (bool) {
+    updateReward(msg.sender);
+    updateReward(to);
+    _transferReceipt(msg.sender, to, amount);
+    return true;
+  }
+
+  function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+    uint256 currentAllowance = allowance[from][msg.sender];
+    require(currentAllowance >= amount, "ERC20: insufficient allowance");
+    allowance[from][msg.sender] = currentAllowance - amount;
+
+    updateReward(from);
+    updateReward(to);
+    _transferReceipt(from, to, amount);
+    return true;
   }
 
   function setRewardRate(uint256 newRewardRate) external onlyOwner {
-    _updateReward(address(0));
     require(newRewardRate > 0, "reward rate must be > 0");
+    updateReward(address(0));
     rewardRate = newRewardRate;
     emit RewardRateUpdated(newRewardRate);
   }
@@ -82,8 +123,8 @@ contract StakingRewards {
   }
 
   function stake(uint256 amount) external {
-    _updateReward(msg.sender);
     require(amount > 0, "stake amount must be > 0");
+    updateReward(msg.sender);
 
     uint256 approvedAmount = stakingToken.allowance(msg.sender, address(this));
     require(approvedAmount >= amount, "insufficient allowance");
@@ -91,22 +132,18 @@ contract StakingRewards {
     bool transferred = stakingToken.transferFrom(msg.sender, address(this), amount);
     require(transferred, "transfer failed");
 
-    stakedBalance[msg.sender] += amount;
-    totalStaked += amount;
-
+    _mintReceipt(msg.sender, amount);
     emit Staked(msg.sender, amount);
   }
 
   function withdraw(uint256 amount) external {
     require(amount > 0, "withdraw amount must be > 0");
-    uint256 userStake = stakedBalance[msg.sender];
+    uint256 userStake = balanceOf[msg.sender];
     require(userStake >= amount, "withdraw exceeds stake");
 
-    // Snapshot rewards at the pre-withdraw stake level.
-    _updateReward(msg.sender);
+    updateReward(msg.sender);
 
-    stakedBalance[msg.sender] = userStake - amount;
-    totalStaked -= amount;
+    _burnReceipt(msg.sender, amount);
 
     bool transferred = stakingToken.transfer(msg.sender, amount);
     require(transferred, "withdraw transfer failed");
@@ -115,7 +152,7 @@ contract StakingRewards {
   }
 
   function claimRewards() external {
-    _updateReward(msg.sender);
+    updateReward(msg.sender);
     uint256 earnedRewards = rewards[msg.sender];
     require(earnedRewards > 0, "no rewards to claim");
 
@@ -124,5 +161,36 @@ contract StakingRewards {
     require(transferred, "reward transfer failed");
 
     emit RewardClaimed(msg.sender, earnedRewards);
+  }
+
+  function _transferReceipt(address from, address to, uint256 amount) internal {
+    require(to != address(0), "invalid recipient");
+
+    uint256 fromBalance = balanceOf[from];
+    require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+
+    balanceOf[from] = fromBalance - amount;
+    balanceOf[to] += amount;
+
+    emit Transfer(from, to, amount);
+  }
+
+  function _mintReceipt(address to, uint256 amount) internal {
+    require(to != address(0), "invalid recipient");
+
+    balanceOf[to] += amount;
+    totalSupply += amount;
+
+    emit Transfer(address(0), to, amount);
+  }
+
+  function _burnReceipt(address from, uint256 amount) internal {
+    uint256 fromBalance = balanceOf[from];
+    require(fromBalance >= amount, "burn exceeds balance");
+
+    balanceOf[from] = fromBalance - amount;
+    totalSupply -= amount;
+
+    emit Transfer(from, address(0), amount);
   }
 }
